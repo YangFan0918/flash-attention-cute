@@ -266,7 +266,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         auto gV = local_tile(V, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
         auto tVgV = g2s_thr_copy.partition_S(gV);
         auto tVsV = g2s_thr_copy.partition_D(sV);
-        __syncthreads();  // reuse smem after K is consumed
         cute::copy(g2s_tiled_copy, tVgV, tVsV);
         cp_async_fence();
         cp_async_wait<0>();
