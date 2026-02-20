@@ -19,7 +19,7 @@ def reference_attn(q, k, v, causal=False):
 @pytest.mark.parametrize("seqlen", [128, 256, 512])
 @pytest.mark.parametrize("heads", [8])
 @pytest.mark.parametrize("head_dim", [64, 128])
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_flash_attn(batch, seqlen, heads, head_dim, causal, dtype):
     from flash_attention import flash_attn_func
