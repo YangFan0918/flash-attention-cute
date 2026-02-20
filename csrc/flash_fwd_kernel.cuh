@@ -225,6 +225,11 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         for (int i = 0; i < size<0>(tSrS); i += 2) {
             new_row_max(i) = new_row_max(i + 1) = max(new_row_max(i), new_row_max(i + 1));
         }
+        // Reduce across 4 threads that share the same row
+        #pragma unroll
+        for (int mi = 0; mi < size<0>(tSrS); mi++) {
+            new_row_max(mi) = warp_reduce_max<float, 4>(new_row_max(mi));
+        }
 
         // Rescale previous output and exp-sum
         auto rescale = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
@@ -262,12 +267,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
                 }
             }
         }
-        // Merge row_sum for elements in the same row
-        #pragma unroll
-        for (int i = 0; i < size<0>(tSrS); i += 2) {
-            row_sum(i) = row_sum(i + 1) = row_sum(i) + row_sum(i + 1);
-        }
-
         // --- 7e. Copy V block to smem ---
         auto gV = local_tile(mV, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _));
         auto tVgV = g2s_thr_copy.partition_S(gV);
@@ -308,6 +307,15 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     }
 
     // ======================== Step 8: Normalize O ========================
+    // Merge row_sum for same-row pairs, then reduce across 4 threads
+    #pragma unroll
+    for (int i = 0; i < size<0>(tOrO); i += 2) {
+        row_sum(i) = row_sum(i + 1) = row_sum(i) + row_sum(i + 1);
+    }
+    #pragma unroll
+    for (int mi = 0; mi < size<0>(tOrO); mi++) {
+        row_sum(mi) = warp_reduce_sum<float, 4>(row_sum(mi));
+    }
     #pragma unroll
     for (int mi = 0; mi < size<0>(tOrO); mi++) {
         float inv_sum = (row_sum(mi) == 0.f) ? 1.f : 1.f / row_sum(mi);
