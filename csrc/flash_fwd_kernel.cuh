@@ -211,17 +211,14 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         // --- 7d. Online softmax ---
-        // Compute new row max across all columns
+        // Compute new row max across all N-columns (MMA_M must be 1)
         auto new_row_max = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
         fill(new_row_max, -INFINITY);
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             #pragma unroll
-            for (int ni = 0; ni < size<1>(tSrS); ni++) {
-                #pragma unroll
-                for (int ki = 0; ki < size<2>(tSrS); ki++) {
-                    new_row_max(mi) = max(new_row_max(mi), tSrS(mi, ni, ki));
-                }
+            for (int ni = 0; ni < size<2>(tSrS); ni++) {
+                new_row_max(mi) = max(new_row_max(mi), tSrS(mi, 0, ni));
             }
         }
         // Merge within same row: in (2,2) atom layout, mi and mi+1 share a row
@@ -263,12 +260,9 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             float max_val = row_max(mi);
             #pragma unroll
-            for (int ni = 0; ni < size<1>(tSrS); ni++) {
-                #pragma unroll
-                for (int ki = 0; ki < size<2>(tSrS); ki++) {
-                    tSrS(mi, ni, ki) = exp2f((tSrS(mi, ni, ki) - max_val) * float(M_LOG2E));
-                    row_sum(mi) += tSrS(mi, ni, ki);
-                }
+            for (int ni = 0; ni < size<2>(tSrS); ni++) {
+                tSrS(mi, 0, ni) = exp2f((tSrS(mi, 0, ni) - max_val) * float(M_LOG2E));
+                row_sum(mi) += tSrS(mi, 0, ni);
             }
         }
         // --- 7e. Copy V block to smem ---
