@@ -247,11 +247,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         #pragma unroll
         for (int mi = 0; mi < size<0>(tOrO); mi++) {
             #pragma unroll
-            for (int ni = 0; ni < size<1>(tOrO); ni++) {
-                #pragma unroll
-                for (int ki = 0; ki < size<2>(tOrO); ki++) {
-                    tOrO(mi, ni, ki) *= rescale(mi);
-                }
+            for (int ni = 0; ni < size<2>(tOrO); ni++) {
+                tOrO(mi, 0, ni) *= rescale(mi);
             }
         }
 
