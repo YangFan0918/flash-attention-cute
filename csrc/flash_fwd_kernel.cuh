@@ -101,8 +101,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
     // ======================== Step 2: local_tile — get current block ========================
     // gQ: (kBlockM, kHeadDim) — this thread block's Q tile
-    auto gQ = local_tile(mQ, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, _));
-    auto gO = local_tile(mO, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, _));
+    auto gQ = local_tile(mQ, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, 0));
+    auto gO = local_tile(mO, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, 0));
 
     // ======================== Step 3: Shared memory tensors ========================
     extern __shared__ char smem_[];
@@ -145,9 +145,12 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto tSsK = s2r_thr_copy_K.partition_S(sK);
 
     // smem → register for PV gemm: V uses transposed load
+    // Transpose sV layout: (kBlockN, kHeadDim) → (kHeadDim, kBlockN)
+    // so partition_fragment_B sees N=kHeadDim, K=kBlockN
+    auto sVt = make_tensor(sV.data(), make_layout(get<1>(sV.layout()), get<0>(sV.layout())));
     auto s2r_tiled_copy_V = make_tiled_copy_B(SmemCopyAtomTransposed{}, tiled_mma);
     auto s2r_thr_copy_V   = s2r_tiled_copy_V.get_thread_slice(threadIdx.x);
-    auto tOsV = s2r_thr_copy_V.partition_S(sV);
+    auto tOsV = s2r_thr_copy_V.partition_S(sVt);
 
     // P (scores) smem: reuse sK memory, with SmemLayoutP
     auto sP = make_tensor(make_smem_ptr(smem_k), SmemLayoutP{});
@@ -176,7 +179,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
     for (int n_block = 0; n_block < n_block_max; n_block++) {
         // --- 7a. Copy K block to smem ---
-        auto gK = local_tile(mK, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _));
+        auto gK = local_tile(mK, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
         auto tKgK = g2s_thr_copy.partition_S(gK);
         auto tKsK = g2s_thr_copy.partition_D(sK);
         cute::copy(g2s_tiled_copy, tKgK, tKsK);
@@ -268,7 +271,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             }
         }
         // --- 7e. Copy V block to smem ---
-        auto gV = local_tile(mV, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _));
+        auto gV = local_tile(mV, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
         auto tVgV = g2s_thr_copy.partition_S(gV);
         auto tVsV = g2s_thr_copy.partition_D(sV);
         __syncthreads();  // reuse smem after K is consumed
@@ -295,8 +298,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         auto tSrP_copy = s2r_thr_copy_P.retile_D(tSrP);
         cute::copy(s2r_tiled_copy_P, tPsP, tSrP_copy);
 
-        // Load V from smem as MMA B operand
-        auto tOrV = thr_mma.partition_fragment_B(sV);
+        // Load V from smem as MMA B operand (transposed view)
+        auto tOrV = thr_mma.partition_fragment_B(sVt);
         auto tOrV_copy = s2r_thr_copy_V.retile_D(tOrV);
         cute::copy(s2r_tiled_copy_V, tOsV, tOrV_copy);
 
