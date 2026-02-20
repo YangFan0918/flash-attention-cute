@@ -154,7 +154,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto tOsV = s2r_thr_copy_V.partition_S(sVt);
 
     // P (scores) smem: reuse sK memory, with SmemLayoutP
-    auto sP = make_tensor(make_smem_ptr(smem_k), SmemLayoutP{});////????什么时候用
+    auto sP = make_tensor(make_smem_ptr(smem_k), SmemLayoutP{});
 
     // smem → register for P: as MMA A operand
     auto s2r_tiled_copy_P = make_tiled_copy_A(Smem2RegCopyAtomA{}, tiled_mma);
@@ -280,14 +280,15 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         // Write P to smem (reuse sK space) via C fragment mapping
+        // TODO:use cute layout
         auto tCsP = thr_mma.partition_C(sP);
         cute::copy(tSrS_elem, tCsP);
         __syncthreads();
 
         // Load P from smem as MMA A operand
-        auto tSrP = thr_mma.partition_fragment_A(sP);
-        auto tSrP_copy = s2r_thr_copy_P.retile_D(tSrP);
-        cute::copy(s2r_tiled_copy_P, tPsP, tSrP_copy);
+        auto tOrP = thr_mma.partition_fragment_A(sP);
+        auto tOrP_copy = s2r_thr_copy_P.retile_D(tOrP);
+        cute::copy(s2r_tiled_copy_P, tPsP, tOrP_copy);
 
         // Load V from smem as MMA B operand (transposed view)
         auto tOrV = thr_mma.partition_fragment_B(sVt);
@@ -295,7 +296,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         cute::copy(s2r_tiled_copy_V, tOsV, tOrV_copy);
 
         // Accumulate: O += P @ V
-        cute::gemm(tiled_mma, tSrP, tOrV, tOrO);
+        cute::gemm(tiled_mma, tOrP, tOrV, tOrO);
 
         __syncthreads();
     }
@@ -314,11 +315,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     for (int mi = 0; mi < size<0>(tOrO); mi++) {
         float inv_sum = (row_sum(mi) == 0.f) ? 1.f : 1.f / row_sum(mi);
         #pragma unroll
-        for (int ni = 0; ni < size<1>(tOrO); ni++) {
-            #pragma unroll
-            for (int ki = 0; ki < size<2>(tOrO); ki++) {
-                tOrO(mi, ni, ki) *= inv_sum;
-            }
+        for (int ni = 0; ni < size<2>(tOrO); ni++) {
+            tOrO(mi, 0, ni) *= inv_sum;
         }
     }
 
