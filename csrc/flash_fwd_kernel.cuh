@@ -99,8 +99,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
     // ======================== Step 2: local_tile — get current block ========================
     // gQ: (kBlockM, kHeadDim) — this thread block's Q tile
-    auto gQ = local_tile(mQ, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, _0{}));
-    auto gO = local_tile(mO, make_tile(Int<kBlockM>, Int<kHeadDim>{}), make_coord(m_block, _0{}));
+    auto gQ = local_tile(mQ, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, _));
+    auto gO = local_tile(mO, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, _));
 
     // ======================== Step 3: Shared memory tensors ========================
     extern __shared__ char smem_[];
@@ -166,7 +166,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
     for (int n_block = 0; n_block < n_block_max; n_block++) {
         // --- 7a. Copy K block to smem ---
-        auto gK = local_tile(mK, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _0{}));
+        auto gK = local_tile(mK, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _));
         auto tKgK = gmem_thr_copy.partition_S(gK);
         auto tKsK = gmem_thr_copy.partition_D(sK);
         cute::copy(gmem_tiled_copy, tKgK, tKsK);
@@ -241,7 +241,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         // --- 7e. Copy V block to smem ---
-        auto gV = local_tile(mV, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _0{}));
+        auto gV = local_tile(mV, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, _));
         auto tVgV = gmem_thr_copy.partition_S(gV);
         auto tVsV = gmem_thr_copy.partition_D(sV);
         __syncthreads();  // reuse smem after K is consumed
