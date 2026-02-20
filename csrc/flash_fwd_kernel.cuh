@@ -60,6 +60,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     using Smem2GmemCopyO = typename Traits::Smem2GmemCopyO;
     using SmemCopyAtom = typename Traits::SmemCopyAtom;
     using SmemCopyAtomTransposed = typename Traits::SmemCopyAtomTransposed;
+    using SmemLayoutVt = typename Traits::SmemLayoutVt;
 
     constexpr int kBlockM  = Traits::kBlockM;
     constexpr int kBlockN  = Traits::kBlockN;
@@ -145,9 +146,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto tSsK = s2r_thr_copy_K.partition_S(sK);
 
     // smem → register for PV gemm: V uses transposed load
-    // Transpose sV layout: (kBlockN, kHeadDim) → (kHeadDim, kBlockN)
-    // so partition_fragment_B sees N=kHeadDim, K=kBlockN
-    auto sVt = make_tensor(sV.data(), make_layout(get<1>(sV.layout()), get<0>(sV.layout())));
+    // sVt: (kHeadDim, kBlockN) transposed view of same V data in smem
+    auto sVt = make_tensor(sV.data(), SmemLayoutVt{});
     auto s2r_tiled_copy_V = make_tiled_copy_B(SmemCopyAtomTransposed{}, tiled_mma);
     auto s2r_thr_copy_V   = s2r_tiled_copy_V.get_thread_slice(threadIdx.x);
     auto tOsV = s2r_thr_copy_V.partition_S(sVt);

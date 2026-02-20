@@ -57,6 +57,14 @@ struct FlashFwdTraits {
     using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtom{}, Shape<Int<kBlockN>, Int<kHeadDim>>{}));
     using SmemLayoutV = SmemLayoutK;
 
+    // V transposed layout: (kHeadDim, kBlockN) — column-major view of same V data
+    // Element (d, n) → offset d + n*kHeadDim, same physical location as (n, d) in SmemLayoutV
+    using SmemLayoutAtomVt = decltype(composition(
+        SmemSwizzle{},
+        Layout<Shape<Int<kHeadDim>, _8>, Stride<_1, Int<kHeadDim>>>{}
+    ));
+    using SmemLayoutVt = decltype(tile_to_shape(SmemLayoutAtomVt{}, Shape<Int<kHeadDim>, Int<kBlockN>>{}));
+
     // P (scores) layout: (kBlockM, kBlockN) — for PV gemm, P goes through smem
     using SmemLayoutAtomP = decltype(composition(
         Swizzle<3, 3, 3>{},
