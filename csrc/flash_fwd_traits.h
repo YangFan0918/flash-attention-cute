@@ -74,7 +74,7 @@ struct FlashFwdTraits {
 
     // ======================== TiledCopy: gmem ↔ smem ========================
     // gmem → smem: async copy, 128 bits per thread
-    using Gmem2SmemCopyQKV = decltype(make_tiled_copy(
+    using Gmem2SmemTiledCopyQKV = decltype(make_tiled_copy(
         Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, Element>{},
         Layout<Shape<Int<kNThreads / (kHeadDim / 8)>, Int<kHeadDim / 8>>,
                Stride<Int<kHeadDim / 8>, _1>>{},
@@ -82,7 +82,7 @@ struct FlashFwdTraits {
     ));
 
     // smem → gmem: O write-back, same layout but non-async
-    using Smem2GmemCopyO = decltype(make_tiled_copy(
+    using Smem2GmemTiledCopyO = decltype(make_tiled_copy(
         Copy_Atom<UniversalCopy<uint128_t>, Element>{},
         Layout<Shape<Int<kNThreads / (kHeadDim / 8)>, Int<kHeadDim / 8>>,
                Stride<Int<kHeadDim / 8>, _1>>{},
@@ -91,9 +91,9 @@ struct FlashFwdTraits {
 
     // ======================== SmemTiledCopy ========================
     // smem → register copy, matched to TiledMMA's expected layout
-    using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, Element>;          // A operand: 4×u32 = 8 halfs/thread
-    using SmemCopyAtomB = Copy_Atom<SM75_U32x2_LDSM_N, Element>;         // B operand: 2×u32 = 4 halfs/thread
-    using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x4_LDSM_T, Element>; // B operand transposed
+    using Smem2RegCopyAtomA  = Copy_Atom<SM75_U32x4_LDSM_N, Element>;  // A operand: 4×u32 = 8 halfs/thread
+    using Smem2RegCopyAtomB  = Copy_Atom<SM75_U32x2_LDSM_N, Element>;  // B operand: 2×u32 = 4 halfs/thread
+    using Smem2RegCopyAtomBt = Copy_Atom<SM75_U16x4_LDSM_T, Element>;  // B operand transposed
 
     // ======================== Shared memory size ========================
     static constexpr int kSmemSize = (kBlockM + 2 * kBlockN) * kHeadDim * sizeof(Element);
