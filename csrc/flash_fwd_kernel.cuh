@@ -56,6 +56,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     using SmemLayoutK = typename Traits::SmemLayoutK;
     using SmemLayoutV = typename Traits::SmemLayoutV;
     using GmemTiledCopyQKV = typename Traits::GmemTiledCopyQKV;
+    using SmemLayoutP = typename Traits::SmemLayoutP;
+    using GmemTiledCopyO = typename Traits::GmemTiledCopyO;
     using SmemCopyAtom = typename Traits::SmemCopyAtom;
     using SmemCopyAtomTransposed = typename Traits::SmemCopyAtomTransposed;
 
@@ -147,6 +149,14 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto smem_thr_copy_V   = smem_tiled_copy_V.get_thread_slice(threadIdx.x);
     auto tOsV = smem_thr_copy_V.partition_S(sV);
 
+    // P (scores) smem: reuse sK memory, with SmemLayoutP
+    auto sP = make_tensor(make_smem_ptr(smem_k), SmemLayoutP{});
+
+    // SmemTiledCopy for P: smem → register as MMA A operand
+    auto smem_tiled_copy_P = make_tiled_copy_A(SmemCopyAtom{}, tiled_mma);
+    auto smem_thr_copy_P   = smem_tiled_copy_P.get_thread_slice(threadIdx.x);
+    auto tPsP = smem_thr_copy_P.partition_S(sP);
+
     // ======================== Step 6: Load Q to smem (once) ========================
     cute::copy(gmem_tiled_copy, tQgQ, tQsQ);
     cp_async_fence();
@@ -197,17 +207,24 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         // --- 7d. Online softmax ---
-        // Compute new row max
+        // Compute new row max across all columns
         auto new_row_max = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
         fill(new_row_max, -INFINITY);
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             #pragma unroll
             for (int ni = 0; ni < size<1>(tSrS); ni++) {
-                new_row_max(mi) = max(new_row_max(mi), tSrS(mi, ni, 0));
+                #pragma unroll
+                for (int ki = 0; ki < size<2>(tSrS); ki++) {
+                    new_row_max(mi) = max(new_row_max(mi), tSrS(mi, ni, ki));
+                }
             }
         }
-        // TODO: warp-level reduction for row_max across threads sharing the same row
+        // Merge within same row: in (2,2) atom layout, mi and mi+1 share a row
+        #pragma unroll
+        for (int i = 0; i < size<0>(tSrS); i += 2) {
+            new_row_max(i) = new_row_max(i + 1) = max(new_row_max(i), new_row_max(i + 1));
+        }
 
         // Rescale previous output and exp-sum
         auto rescale = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
@@ -225,7 +242,10 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         for (int mi = 0; mi < size<0>(tOrO); mi++) {
             #pragma unroll
             for (int ni = 0; ni < size<1>(tOrO); ni++) {
-                tOrO(mi, ni, 0) *= rescale(mi);
+                #pragma unroll
+                for (int ki = 0; ki < size<2>(tOrO); ki++) {
+                    tOrO(mi, ni, ki) *= rescale(mi);
+                }
             }
         }
 
@@ -235,9 +255,17 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             float max_val = row_max(mi);
             #pragma unroll
             for (int ni = 0; ni < size<1>(tSrS); ni++) {
-                tSrS(mi, ni, 0) = exp2f((tSrS(mi, ni, 0) - max_val) * float(M_LOG2E));
-                row_sum(mi) += tSrS(mi, ni, 0);
+                #pragma unroll
+                for (int ki = 0; ki < size<2>(tSrS); ki++) {
+                    tSrS(mi, ni, ki) = exp2f((tSrS(mi, ni, ki) - max_val) * float(M_LOG2E));
+                    row_sum(mi) += tSrS(mi, ni, ki);
+                }
             }
+        }
+        // Merge row_sum for elements in the same row
+        #pragma unroll
+        for (int i = 0; i < size<0>(tSrS); i += 2) {
+            row_sum(i) = row_sum(i + 1) = row_sum(i) + row_sum(i + 1);
         }
 
         // --- 7e. Copy V block to smem ---
@@ -251,34 +279,64 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         __syncthreads();
 
         // --- 7f. Compute O += P @ V ---
-        // Convert P (float32 scores) to fp16/bf16 for MMA input
-        // TODO: convert tSrS to Element type and retile for MMA A operand
-        // Then: cute::gemm(tiled_mma, tSrP_retiled, tOrV, tOrO);
+        // Convert float32 scores to fp16/bf16
+        auto tSrS_elem = make_tensor_like<Element>(tSrS);
+        #pragma unroll
+        for (int i = 0; i < size(tSrS); i++) {
+            tSrS_elem(i) = Element(tSrS(i));
+        }
 
+        // Write P to smem (reuse sK space) via C fragment mapping
+        auto tCsP = thr_mma.partition_C(sP);
+        cute::copy(tSrS_elem, tCsP);
+        __syncthreads();
+
+        // Load P from smem as MMA A operand
+        auto tSrP = thr_mma.partition_fragment_A(sP);
+        auto tSrP_copy = smem_thr_copy_P.retile_D(tSrP);
+        cute::copy(smem_tiled_copy_P, tPsP, tSrP_copy);
+
+        // Load V from smem as MMA B operand
         auto tOrV = thr_mma.partition_fragment_B(sV);
         auto tOrV_copy = smem_thr_copy_V.retile_D(tOrV);
         cute::copy(smem_tiled_copy_V, tOsV, tOrV_copy);
 
-        // For now: naive accumulation (replace with proper MMA once P conversion is done)
-        // cute::gemm(tiled_mma, tSrP, tOrV, tOrO);
+        // Accumulate: O += P @ V
+        cute::gemm(tiled_mma, tSrP, tOrV, tOrO);
 
         __syncthreads();
     }
 
     // ======================== Step 8: Normalize O ========================
-    // TODO: warp-level reduction for row_sum
     #pragma unroll
     for (int mi = 0; mi < size<0>(tOrO); mi++) {
         float inv_sum = (row_sum(mi) == 0.f) ? 1.f : 1.f / row_sum(mi);
         #pragma unroll
         for (int ni = 0; ni < size<1>(tOrO); ni++) {
-            tOrO(mi, ni, 0) *= inv_sum;
+            #pragma unroll
+            for (int ki = 0; ki < size<2>(tOrO); ki++) {
+                tOrO(mi, ni, ki) *= inv_sum;
+            }
         }
     }
 
     // ======================== Step 9: Write O to gmem ========================
-    // Convert float32 accumulator to fp16/bf16 and store
-    // TODO: copy tOrO → smem → gmem (or direct register → gmem if layout matches)
+    // Convert float32 accumulator to fp16/bf16 and write to smem (reuse sQ)
+    auto tOrO_elem = make_tensor_like<Element>(tOrO);
+    #pragma unroll
+    for (int i = 0; i < size(tOrO); i++) {
+        tOrO_elem(i) = Element(tOrO(i));
+    }
+    auto tCsO = thr_mma.partition_C(sQ);
+    cute::copy(tOrO_elem, tCsO);
+    __syncthreads();
+
+    // Copy smem → gmem
+    GmemTiledCopyO gmem_tiled_copy_O;
+    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(threadIdx.x);
+    auto tOsO = gmem_thr_copy_O.partition_S(sQ);
+    auto tOgO = gmem_thr_copy_O.partition_D(gO);
+    cute::copy(gmem_tiled_copy_O, tOsO, tOgO);
 }
 
 } // namespace flash
