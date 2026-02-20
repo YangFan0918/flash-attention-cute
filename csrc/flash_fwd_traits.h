@@ -64,18 +64,17 @@ struct FlashFwdTraits {
     ));
     using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, Shape<Int<kBlockM>, Int<kBlockN>>{}));
 
-    // ======================== GmemTiledCopy ========================
-    // Async copy: each thread copies 128 bits = 8 fp16 elements
-    using GmemCopyAtom = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, Element>;
-    using GmemTiledCopyQKV = decltype(make_tiled_copy(
-        GmemCopyAtom{},
+    // ======================== TiledCopy: gmem ↔ smem ========================
+    // gmem → smem: async copy, 128 bits per thread
+    using Gmem2SmemCopyQKV = decltype(make_tiled_copy(
+        Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, Element>{},
         Layout<Shape<Int<kNThreads / (kHeadDim / 8)>, Int<kHeadDim / 8>>,
-               Stride<Int<kHeadDim / 8>, _1>>{},  // thread layout: rows x cols
-        Layout<Shape<_1, _8>>{}                     // each thread copies 8 elements
+               Stride<Int<kHeadDim / 8>, _1>>{},
+        Layout<Shape<_1, _8>>{}
     ));
 
-    // O write-back: smem → gmem, same layout but non-async copy
-    using GmemTiledCopyO = decltype(make_tiled_copy(
+    // smem → gmem: O write-back, same layout but non-async
+    using Smem2GmemCopyO = decltype(make_tiled_copy(
         Copy_Atom<UniversalCopy<uint128_t>, Element>{},
         Layout<Shape<Int<kNThreads / (kHeadDim / 8)>, Int<kHeadDim / 8>>,
                Stride<Int<kHeadDim / 8>, _1>>{},
