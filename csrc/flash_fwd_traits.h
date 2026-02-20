@@ -91,8 +91,9 @@ struct FlashFwdTraits {
 
     // ======================== SmemTiledCopy ========================
     // smem → register copy, matched to TiledMMA's expected layout
-    using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, Element>;
-    using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x4_LDSM_T, Element>;
+    using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, Element>;          // A operand: 4×u32 = 8 halfs/thread
+    using SmemCopyAtomB = Copy_Atom<SM75_U32x2_LDSM_N, Element>;         // B operand: 2×u32 = 4 halfs/thread
+    using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x4_LDSM_T, Element>; // B operand transposed
 
     // ======================== Shared memory size ========================
     static constexpr int kSmemSize = (kBlockM + 2 * kBlockN) * kHeadDim * sizeof(Element);

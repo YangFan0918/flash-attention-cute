@@ -141,7 +141,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto s2r_thr_copy_Q   = s2r_tiled_copy_Q.get_thread_slice(threadIdx.x);
     auto tSsQ = s2r_thr_copy_Q.partition_S(sQ);
 
-    auto s2r_tiled_copy_K = make_tiled_copy_B(SmemCopyAtom{}, tiled_mma);
+    using SmemCopyAtomB = typename Traits::SmemCopyAtomB;
+    auto s2r_tiled_copy_K = make_tiled_copy_B(SmemCopyAtomB{}, tiled_mma);
     auto s2r_thr_copy_K   = s2r_tiled_copy_K.get_thread_slice(threadIdx.x);
     auto tSsK = s2r_thr_copy_K.partition_S(sK);
 
