@@ -106,7 +106,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     extern __shared__ char smem_[];
     Element* smem_q = reinterpret_cast<Element*>(smem_);
     Element* smem_k = smem_q + cosize(SmemLayoutQ{});
-    Element* smem_v = smem_k + cosize(SmemLayoutK);
+    Element* smem_v = smem_k + cosize(SmemLayoutK{});
 
     auto sQ = make_tensor(make_smem_ptr(smem_q), SmemLayoutQ{});
     auto sK = make_tensor(make_smem_ptr(smem_k), SmemLayoutK{});
