@@ -70,7 +70,7 @@ def main():
 
         label = f"b={batch} s={seqlen} h={heads} d={head_dim}"
         if has_official:
-            official_ms = benchmark_fn(flash_attn_official, q, k, v, causal=False)
+            official_ms = benchmark_fn(lambda q, k, v, c: flash_attn_official(q, k, v, causal=c), q, k, v, False)
             off_tflops = flops / (official_ms * 1e-3) / 1e12
             speedup = official_ms / ours_ms
             print(f"{label:<30} {ours_ms:>10.3f} {ours_tflops:>11.1f} {official_ms:>14.3f} {off_tflops:>11.1f} {speedup:>9.2f}x")
