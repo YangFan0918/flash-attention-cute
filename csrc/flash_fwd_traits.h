@@ -65,13 +65,6 @@ struct FlashFwdTraits {
     ));
     using SmemLayoutVt = decltype(tile_to_shape(SmemLayoutAtomVt{}, Shape<Int<kHeadDim>, Int<kBlockN>>{}));
 
-    // P (scores) layout: (kBlockM, kBlockN) — for PV gemm, P goes through smem
-    using SmemLayoutAtomP = decltype(composition(
-        Swizzle<3, 3, 3>{},
-        Layout<Shape<_8, Int<kBlockN>>, Stride<Int<kBlockN>, _1>>{}
-    ));
-    using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, Shape<Int<kBlockM>, Int<kBlockN>>{}));
-
     // ======================== TiledCopy: gmem ↔ smem ========================
     // gmem → smem: async copy, 128 bits per thread
     using Gmem2SmemTiledCopyQKV = decltype(make_tiled_copy(

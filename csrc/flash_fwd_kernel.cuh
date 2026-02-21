@@ -56,7 +56,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     using SmemLayoutK = typename Traits::SmemLayoutK;
     using SmemLayoutV = typename Traits::SmemLayoutV;
     using Gmem2SmemTiledCopyQKV = typename Traits::Gmem2SmemTiledCopyQKV;
-    using SmemLayoutP = typename Traits::SmemLayoutP;
     using Smem2GmemTiledCopyO = typename Traits::Smem2GmemTiledCopyO;
     using Smem2RegCopyAtomA = typename Traits::Smem2RegCopyAtomA;
     using Smem2RegCopyAtomB = typename Traits::Smem2RegCopyAtomB;
@@ -153,13 +152,11 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto s2r_thr_copy_V   = s2r_tiled_copy_V.get_thread_slice(threadIdx.x);
     auto tOsV = s2r_thr_copy_V.partition_S(sVt);
 
-    // P (scores) smem: reuse sK memory, with SmemLayoutP
-    auto sP = make_tensor(make_smem_ptr(smem_k), SmemLayoutP{});
-
-    // smem → register for P: as MMA A operand
-    auto s2r_tiled_copy_P = make_tiled_copy_A(Smem2RegCopyAtomA{}, tiled_mma);
-    auto s2r_thr_copy_P   = s2r_tiled_copy_P.get_thread_slice(threadIdx.x);
-    auto tPsP = s2r_thr_copy_P.partition_S(sP);
+    // Layout algebra: convert MMA C fragment → A fragment in registers (no smem round-trip)
+    auto score_ref = make_tensor(static_cast<Element*>(nullptr),
+                                 make_layout(make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
+    auto c2a = left_inverse(thr_mma.partition_C(score_ref).layout())
+               .compose(thr_mma.partition_A(score_ref).layout());
 
     // ======================== Step 6: Load Q to smem (once) ========================
     cute::copy(g2s_tiled_copy, tQgQ, tQsQ);
@@ -189,7 +186,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         __syncthreads();
 
         // --- 7b. Compute S = Q @ K^T ---
-        auto tSrS = thr_mma.partition_fragment_C(sP);
+        auto tSrS = thr_mma.partition_fragment_C(score_ref);
         clear(tSrS);
 
         auto tSrK = thr_mma.partition_fragment_B(sK);
@@ -279,16 +276,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             tSrS_elem(i) = Element(tSrS(i));
         }
 
-        // Write P to smem (reuse sK space) via C fragment mapping
-        // TODO:use cute layout
-        auto tCsP = thr_mma.partition_C(sP);
-        cute::copy(tSrS_elem, tCsP);
-        __syncthreads();
-
-        // Load P from smem as MMA A operand
-        auto tOrP = thr_mma.partition_fragment_A(sP);
-        auto tOrP_copy = s2r_thr_copy_P.retile_D(tOrP);
-        cute::copy(s2r_tiled_copy_P, tPsP, tOrP_copy);
+        // Reinterpret C fragment as A fragment via layout algebra (no smem round-trip)
+        auto tOrP = tSrS_elem.compose(c2a);
 
         // Load V from smem as MMA B operand (transposed view)
         auto tOrV = thr_mma.partition_fragment_B(sVt);
