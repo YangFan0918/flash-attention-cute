@@ -10,8 +10,6 @@ using namespace cute;
 
 namespace flash {
 
-// ======================== Softmax utilities ========================
-
 template<typename T, int N>
 __device__ __forceinline__ T warp_reduce_max(T val) {
     #pragma unroll
@@ -30,7 +28,6 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     return val;
 }
 
-// Apply online softmax rescaling to accumulator fragment
 template<typename Tensor0, typename Tensor1>
 __device__ __forceinline__ void scale_apply_exp2(
     Tensor0& tensor, const Tensor1& row_max, float scale_log2)
@@ -45,8 +42,6 @@ __device__ __forceinline__ void scale_apply_exp2(
         }
     }
 }
-
-// ======================== Main kernel ========================
 
 template<typename Traits>
 __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
@@ -70,11 +65,8 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     const int head    = blockIdx.y;
     const int batch   = blockIdx.z;
 
-    // Early exit if this block is beyond seqlen_q
     if (m_block * kBlockM >= params.seqlen_q) return;
 
-    // ======================== Step 1: Create gmem tensors ========================
-    // Q: (seqlen_q, head_dim) for this batch/head
     auto Q = make_tensor(
         make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr)
                       + batch * params.q_batch_stride + head * params.q_head_stride),
@@ -100,12 +92,9 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         make_stride(params.o_row_stride, Int<1>{})
     );
 
-    // ======================== Step 2: local_tile — get current block ========================
-    // gQ: (kBlockM, kHeadDim) — this thread block's Q tile
     auto gQ = local_tile(Q, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, 0));
     auto gO = local_tile(O, make_tile(Int<kBlockM>{}, Int<kHeadDim>{}), make_coord(m_block, 0));
 
-    // ======================== Step 3: Shared memory tensors ========================
     extern __shared__ char smem_[];
     Element* smem_q = reinterpret_cast<Element*>(smem_);
     Element* smem_k = smem_q + cosize(SmemLayoutQ{});
@@ -115,28 +104,23 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto sK = make_tensor(make_smem_ptr(smem_k), SmemLayoutK{});
     auto sV = make_tensor(make_smem_ptr(smem_v), SmemLayoutV{});
 
-    // ======================== Step 4: TiledCopy — partition for gmem↔smem ========================
     Gmem2SmemTiledCopyQKV g2s_tiled_copy;
     auto g2s_thr_copy = g2s_tiled_copy.get_thread_slice(threadIdx.x);
 
-    auto tQgQ = g2s_thr_copy.partition_S(gQ);  // (CPY, CPY_M, CPY_K)
+    auto tQgQ = g2s_thr_copy.partition_S(gQ);
     auto tQsQ = g2s_thr_copy.partition_D(sQ);
 
-    // ======================== Step 5: TiledMMA — partition for compute ========================
     TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
 
-    // Accumulator for output: (MMA, MMA_M, MMA_N) in float32
     auto tOrO = thr_mma.partition_fragment_C(sQ);
     clear(tOrO);
 
-    // Row max and row sum for online softmax — one per M-row this thread owns
     auto row_max = make_tensor<float>(Shape<Int<size<0>(tOrO)>>{});
     auto row_sum = make_tensor<float>(Shape<Int<size<0>(tOrO)>>{});
     fill(row_max, -INFINITY);
     fill(row_sum, 0.f);
 
-    // smem → register for QK^T gemm
     auto s2r_tiled_copy_Q = make_tiled_copy_A(Smem2RegCopyAtomA{}, tiled_mma);
     auto s2r_thr_copy_Q   = s2r_tiled_copy_Q.get_thread_slice(threadIdx.x);
     auto tSsQ = s2r_thr_copy_Q.partition_S(sQ);
@@ -145,38 +129,31 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto s2r_thr_copy_K   = s2r_tiled_copy_K.get_thread_slice(threadIdx.x);
     auto tSsK = s2r_thr_copy_K.partition_S(sK);
 
-    // smem → register for PV gemm: V uses transposed load
-    // sVt: (kHeadDim, kBlockN) transposed view of same V data in smem
     auto sVt = make_tensor(sV.data(), SmemLayoutVt{});
     auto s2r_tiled_copy_V = make_tiled_copy_B(Smem2RegCopyAtomBt{}, tiled_mma);
     auto s2r_thr_copy_V   = s2r_tiled_copy_V.get_thread_slice(threadIdx.x);
     auto tOsV = s2r_thr_copy_V.partition_S(sVt);
 
-    // Layout algebra: convert MMA C fragment → A fragment in registers (no smem round-trip)
     auto score_ref = make_tensor(static_cast<Element*>(nullptr),
                                  make_layout(make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
     auto c2a = left_inverse(thr_mma.partition_C(score_ref).layout())
                .compose(thr_mma.partition_A(score_ref).layout());
 
-    // ======================== Step 6: Load Q to smem (once) ========================
     cute::copy(g2s_tiled_copy, tQgQ, tQsQ);
     cp_async_fence();
     cp_async_wait<0>();
     __syncthreads();
 
-    // Pre-load Q fragments from smem to registers
     auto tSrQ = thr_mma.partition_fragment_A(sQ);
     auto tSrQ_copy = s2r_thr_copy_Q.retile_D(tSrQ);
     cute::copy(s2r_tiled_copy_Q, tSsQ, tSrQ_copy);
 
-    // ======================== Step 7: Main loop over K/V blocks ========================
     const int n_blocks = cute::ceil_div(params.seqlen_k, kBlockN);
     const int n_block_max = params.is_causal
         ? cute::ceil_div((m_block + 1) * kBlockM, kBlockN)
         : n_blocks;
 
     for (int n_block = 0; n_block < n_block_max; n_block++) {
-        // --- 7a. Copy K block to smem ---
         auto gK = local_tile(K, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
         auto tKgK = g2s_thr_copy.partition_S(gK);
         auto tKsK = g2s_thr_copy.partition_D(sK);
@@ -185,7 +162,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         cp_async_wait<0>();
         __syncthreads();
 
-        // --- 7b. Compute S = Q @ K^T ---
         auto tSrS = thr_mma.partition_fragment_C(score_ref);
         clear(tSrS);
 
@@ -195,20 +171,14 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
         cute::gemm(tiled_mma, tSrQ, tSrK, tSrS);
 
-        // Apply softmax scale
         #pragma unroll
         for (int i = 0; i < size(tSrS); i++) {
             tSrS(i) *= params.softmax_scale;
         }
 
-        // --- 7c. Causal mask ---
         if (params.is_causal) {
-            // TODO: apply causal mask based on m_block, n_block positions
-            // mask positions where col > row to -inf
         }
 
-        // --- 7d. Online softmax ---
-        // Compute new row max across all N-columns (MMA_M must be 1)
         auto new_row_max = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
         fill(new_row_max, -INFINITY);
         #pragma unroll
@@ -218,18 +188,15 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
                 new_row_max(mi) = max(new_row_max(mi), tSrS(mi, 0, ni));
             }
         }
-        // Merge within same row: in (2,2) atom layout, mi and mi+1 share a row
         #pragma unroll
         for (int i = 0; i < size<0>(tSrS); i += 2) {
             new_row_max(i) = new_row_max(i + 1) = max(new_row_max(i), new_row_max(i + 1));
         }
-        // Reduce across 4 threads that share the same row
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             new_row_max(mi) = warp_reduce_max<float, 4>(new_row_max(mi));
         }
 
-        // Rescale previous output and exp-sum
         auto rescale = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
@@ -240,7 +207,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             row_sum(mi) *= rescale(mi);
         }
 
-        // Rescale running output accumulator
         #pragma unroll
         for (int mi = 0; mi < size<0>(tOrO); mi++) {
             #pragma unroll
@@ -249,7 +215,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             }
         }
 
-        // Exponentiate scores and accumulate row sum
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             float max_val = row_max(mi);
@@ -259,7 +224,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
                 row_sum(mi) += tSrS(mi, 0, ni);
             }
         }
-        // --- 7e. Copy V block to smem ---
+
         auto gV = local_tile(V, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
         auto tVgV = g2s_thr_copy.partition_S(gV);
         auto tVsV = g2s_thr_copy.partition_D(sV);
@@ -268,30 +233,23 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         cp_async_wait<0>();
         __syncthreads();
 
-        // --- 7f. Compute O += P @ V ---
-        // Convert float32 scores to fp16/bf16
         auto tSrS_elem = make_tensor_like<Element>(tSrS);
         #pragma unroll
         for (int i = 0; i < size(tSrS); i++) {
             tSrS_elem(i) = Element(tSrS(i));
         }
 
-        // Reinterpret C fragment as A fragment via layout algebra (no smem round-trip)
         auto tOrP = tSrS_elem.compose(c2a);
 
-        // Load V from smem as MMA B operand (transposed view)
         auto tOrV = thr_mma.partition_fragment_B(sVt);
         auto tOrV_copy = s2r_thr_copy_V.retile_D(tOrV);
         cute::copy(s2r_tiled_copy_V, tOsV, tOrV_copy);
 
-        // Accumulate: O += P @ V
         cute::gemm(tiled_mma, tOrP, tOrV, tOrO);
 
         __syncthreads();
     }
 
-    // ======================== Step 8: Normalize O ========================
-    // Merge row_sum for same-row pairs, then reduce across 4 threads
     #pragma unroll
     for (int i = 0; i < size<0>(tOrO); i += 2) {
         row_sum(i) = row_sum(i + 1) = row_sum(i) + row_sum(i + 1);
@@ -309,8 +267,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
     }
 
-    // ======================== Step 9: Write O to gmem ========================
-    // Convert float32 accumulator to fp16/bf16 and write to smem (reuse sQ)
     auto tOrO_elem = make_tensor_like<Element>(tOrO);
     #pragma unroll
     for (int i = 0; i < size(tOrO); i++) {
@@ -320,7 +276,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     cute::copy(tOrO_elem, tCsO);
     __syncthreads();
 
-    // smem → gmem
     Smem2GmemTiledCopyO s2g_tiled_copy_O;
     auto s2g_thr_copy_O = s2g_tiled_copy_O.get_thread_slice(threadIdx.x);
     auto tOsO = s2g_thr_copy_O.partition_S(sQ);
