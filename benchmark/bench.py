@@ -33,23 +33,29 @@ def main():
         print("flash-attn not installed, skipping official comparison")
         print("Install with: pip install flash-attn --no-build-isolation\n")
 
-    print(f"{'Config':<30} {'Ours (ms)':>10} {'Official (ms)':>14} {'Speedup':>10}")
-    print("-" * 68)
+    header = f"{'Config':<30} {'Ours (ms)':>10} {'Ours TFLOPS':>12} {'Official (ms)':>14} {'Off TFLOPS':>11} {'Speedup':>10}"
+    print(header)
+    print("-" * len(header))
 
     for batch, seqlen, heads, head_dim in configs:
         q = torch.randn(batch, seqlen, heads, head_dim, device=device, dtype=dtype)
         k = torch.randn(batch, seqlen, heads, head_dim, device=device, dtype=dtype)
         v = torch.randn(batch, seqlen, heads, head_dim, device=device, dtype=dtype)
 
+        # 4 * N * d per query-key-value: 2 for Q@K^T + 2 for scores@V
+        flops = 4 * batch * heads * seqlen * seqlen * head_dim
+
         ours_ms = benchmark_fn(flash_attn_func, q, k, v, False)
+        ours_tflops = flops / (ours_ms * 1e-3) / 1e12
 
         label = f"b={batch} s={seqlen} h={heads} d={head_dim}"
         if has_official:
             official_ms = benchmark_fn(flash_attn_official, q, k, v, causal=False)
+            off_tflops = flops / (official_ms * 1e-3) / 1e12
             speedup = official_ms / ours_ms
-            print(f"{label:<30} {ours_ms:>10.3f} {official_ms:>14.3f} {speedup:>9.2f}x")
+            print(f"{label:<30} {ours_ms:>10.3f} {ours_tflops:>11.1f} {official_ms:>14.3f} {off_tflops:>11.1f} {speedup:>9.2f}x")
         else:
-            print(f"{label:<30} {ours_ms:>10.3f} {'N/A':>14} {'N/A':>10}")
+            print(f"{label:<30} {ours_ms:>10.3f} {ours_tflops:>11.1f} {'N/A':>14} {'N/A':>11} {'N/A':>10}")
 
 
 if __name__ == "__main__":
