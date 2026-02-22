@@ -27,6 +27,7 @@ setup(
                     "--expt-extended-lambda",
                     "-gencode", "arch=compute_86,code=sm_86",
                     "-DCUTE_SM80_ENABLED",
+                    "-Xptxas=-v",
                 ],
             },
             libraries=["cudart"],
