@@ -119,6 +119,6 @@ flash-attention-cute/
 
 ## 参考
 
-- [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.09288)
+- [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691)
 - [CUTLASS](https://github.com/NVIDIA/cutlass)
 - [flash-attention (official)](https://github.com/Dao-AILab/flash-attention)
