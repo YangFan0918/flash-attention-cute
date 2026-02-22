@@ -153,27 +153,33 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         ? cute::ceil_div((m_block + 1) * kBlockM, kBlockN)
         : n_blocks;
 
-    for (int n_block = 0; n_block < n_block_max; n_block++) {
-        auto gK = local_tile(K, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
-        auto tKgK = g2s_thr_copy.partition_S(gK);
-        auto tKsK = g2s_thr_copy.partition_D(sK);
-        cute::copy(g2s_tiled_copy, tKgK, tKsK);
+    {
+        auto gK = local_tile(K, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(0, 0));
+        cute::copy(g2s_tiled_copy, g2s_thr_copy.partition_S(gK), g2s_thr_copy.partition_D(sK));
         cp_async_fence();
+    }
+
+    for (int n_block = 0; n_block < n_block_max; n_block++) {
         cp_async_wait<0>();
         __syncthreads();
+
+        auto gV = local_tile(V, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
+        cute::copy(g2s_tiled_copy, g2s_thr_copy.partition_S(gV), g2s_thr_copy.partition_D(sV));
+        cp_async_fence();
 
         auto tSrS = thr_mma.partition_fragment_C(score_ref);
         clear(tSrS);
 
         auto tSrK = thr_mma.partition_fragment_B(sK);
         auto tSrK_copy = s2r_thr_copy_K.retile_D(tSrK);
-        cute::copy(s2r_tiled_copy_K, tSsK, tSrK_copy);
 
-        cute::gemm(tiled_mma, tSrQ, tSrK, tSrS);
-
+        cute::copy(s2r_tiled_copy_K, tSsK(_, _, 0), tSrK_copy(_, _, 0));
         #pragma unroll
-        for (int i = 0; i < size(tSrS); i++) {
-            tSrS(i) *= params.softmax_scale;
+        for (int ki = 0; ki < size<2>(tSrQ); ki++) {
+            if (ki + 1 < size<2>(tSrQ)) {
+                cute::copy(s2r_tiled_copy_K, tSsK(_, _, ki + 1), tSrK_copy(_, _, ki + 1));
+            }
+            cute::gemm(tiled_mma, tSrQ(_, _, ki), tSrK(_, _, ki), tSrS);
         }
 
         if (params.is_causal) {
@@ -203,7 +209,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             float old_max = row_max(mi);
             float cur_max = max(old_max, new_row_max(mi));
             row_max(mi) = cur_max;
-            rescale(mi) = exp2f((old_max - cur_max) * float(M_LOG2E));
+            rescale(mi) = exp2f((old_max - cur_max) * params.softmax_scale_log2);
             row_sum(mi) *= rescale(mi);
         }
 
@@ -217,21 +223,22 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
-            float max_val = row_max(mi);
+            float max_scaled = row_max(mi) * params.softmax_scale_log2;
             #pragma unroll
             for (int ni = 0; ni < size<2>(tSrS); ni++) {
-                tSrS(mi, 0, ni) = exp2f((tSrS(mi, 0, ni) - max_val) * float(M_LOG2E));
+                tSrS(mi, 0, ni) = exp2f(tSrS(mi, 0, ni) * params.softmax_scale_log2 - max_scaled);
                 row_sum(mi) += tSrS(mi, 0, ni);
             }
         }
 
-        auto gV = local_tile(V, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block, 0));
-        auto tVgV = g2s_thr_copy.partition_S(gV);
-        auto tVsV = g2s_thr_copy.partition_D(sV);
-        cute::copy(g2s_tiled_copy, tVgV, tVsV);
-        cp_async_fence();
         cp_async_wait<0>();
         __syncthreads();
+
+        if (n_block + 1 < n_block_max) {
+            auto gK_next = local_tile(K, make_tile(Int<kBlockN>{}, Int<kHeadDim>{}), make_coord(n_block + 1, 0));
+            cute::copy(g2s_tiled_copy, g2s_thr_copy.partition_S(gK_next), g2s_thr_copy.partition_D(sK));
+            cp_async_fence();
+        }
 
         auto tSrS_elem = make_tensor_like<Element>(tSrS);
         #pragma unroll
@@ -243,11 +250,15 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
         auto tOrV = thr_mma.partition_fragment_B(sVt);
         auto tOrV_copy = s2r_thr_copy_V.retile_D(tOrV);
-        cute::copy(s2r_tiled_copy_V, tOsV, tOrV_copy);
 
-        cute::gemm(tiled_mma, tOrP, tOrV, tOrO);
-
-        __syncthreads();
+        cute::copy(s2r_tiled_copy_V, tOsV(_, _, 0), tOrV_copy(_, _, 0));
+        #pragma unroll
+        for (int ki = 0; ki < size<2>(tOrP); ki++) {
+            if (ki + 1 < size<2>(tOrP)) {
+                cute::copy(s2r_tiled_copy_V, tOsV(_, _, ki + 1), tOrV_copy(_, _, ki + 1));
+            }
+            cute::gemm(tiled_mma, tOrP(_, _, ki), tOrV(_, _, ki), tOrO);
+        }
     }
 
     #pragma unroll
