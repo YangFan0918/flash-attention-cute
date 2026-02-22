@@ -146,7 +146,6 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
     auto tSrQ = thr_mma.partition_fragment_A(sQ);
     auto tSrQ_copy = s2r_thr_copy_Q.retile_D(tSrQ);
-    cute::copy(s2r_tiled_copy_Q, tSsQ, tSrQ_copy);
 
     const int n_blocks = cute::ceil_div(params.seqlen_k, kBlockN);
     const int n_block_max = params.is_causal
@@ -174,10 +173,12 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         auto tSrK_copy = s2r_thr_copy_K.retile_D(tSrK);
 
         cute::copy(s2r_tiled_copy_K, tSsK(_, _, 0), tSrK_copy(_, _, 0));
+        cute::copy(s2r_tiled_copy_Q, tSsQ(_, _, 0), tSrQ_copy(_, _, 0));
         #pragma unroll
         for (int ki = 0; ki < size<2>(tSrQ); ki++) {
             if (ki + 1 < size<2>(tSrQ)) {
                 cute::copy(s2r_tiled_copy_K, tSsK(_, _, ki + 1), tSrK_copy(_, _, ki + 1));
+                cute::copy(s2r_tiled_copy_Q, tSsQ(_, _, ki + 1), tSrQ_copy(_, _, ki + 1));
             }
             cute::gemm(tiled_mma, tSrQ(_, _, ki), tSrK(_, _, ki), tSrS);
         }
