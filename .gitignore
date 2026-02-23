@@ -5,3 +5,4 @@ dist/
 *.o
 __pycache__/
 .cache/
+*.ncu-rep
