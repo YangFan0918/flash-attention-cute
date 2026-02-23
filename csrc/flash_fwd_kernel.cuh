@@ -227,7 +227,7 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
             float max_scaled = row_max(mi) * params.softmax_scale_log2;
             #pragma unroll
             for (int ni = 0; ni < size<2>(tSrS); ni++) {
-                tSrS(mi, 0, ni) = exp2f(tSrS(mi, 0, ni) * params.softmax_scale_log2 - max_scaled);
+                tSrS(mi, 0, ni) = exp2f(__fmaf_rn(tSrS(mi, 0, ni), params.softmax_scale_log2, -max_scaled));
                 row_sum(mi) += tSrS(mi, 0, ni);
             }
         }
