@@ -28,21 +28,6 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     return val;
 }
 
-template<typename Tensor0, typename Tensor1>
-__device__ __forceinline__ void scale_apply_exp2(
-    Tensor0& tensor, const Tensor1& row_max, float scale_log2)
-{
-    static_assert(Tensor0::Layout::rank == 3, "expected rank-3 (MMA_M, MMA_N, pipe)");
-    #pragma unroll
-    for (int mi = 0; mi < size<0>(tensor); mi++) {
-        float max_scaled = row_max(mi) * scale_log2;
-        #pragma unroll
-        for (int ni = 0; ni < size<1>(tensor); ni++) {
-            tensor(mi, ni, 0) = exp2f(tensor(mi, ni, 0) * scale_log2 - max_scaled);
-        }
-    }
-}
-
 template<typename Traits>
 __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     using Element = typename Traits::Element;
