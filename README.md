@@ -11,7 +11,7 @@
 - [x] Swizzle 消除 shared memory bank conflict
 - [x] ldmatrix / MMA 交错调度，隐藏 smem→reg 延迟
 - [ ] Grouped Query Attention (GQA)
-- [ ] Causal Masking
+- [x] Causal Masking
 - [ ] Backward Pass
 
 ## 环境要求

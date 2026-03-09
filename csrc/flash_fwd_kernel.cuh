@@ -124,6 +124,9 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
     auto c2a = left_inverse(thr_mma.partition_C(score_ref).layout())
                .compose(thr_mma.partition_A(score_ref).layout());
 
+    auto cS = make_identity_tensor(make_shape(Int<kBlockM>{}, Int<kBlockN>{}));
+    auto tScS = thr_mma.partition_C(cS);
+
     cute::copy(g2s_tiled_copy, tQgQ, tQsQ);
     cp_async_fence();
     cp_async_wait<0>();
@@ -169,6 +172,19 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         if (params.is_causal) {
+            if (n_block * kBlockN >= m_block * kBlockM) {
+                #pragma unroll
+                for (int mi = 0; mi < size<0>(tSrS); mi++) {
+                    #pragma unroll
+                    for (int ni = 0; ni < size<2>(tSrS); ni++) {
+                        int row = m_block * kBlockM + int(get<0>(tScS(mi, 0, ni)));
+                        int col = n_block * kBlockN + int(get<1>(tScS(mi, 0, ni)));
+                        if (col > row) {
+                            tSrS(mi, 0, ni) = -INFINITY;
+                        }
+                    }
+                }
+            }
         }
 
         auto new_row_max = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
