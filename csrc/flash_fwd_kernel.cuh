@@ -190,12 +190,14 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
         }
 
         auto rescale = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
+        auto max_scaled = make_tensor<float>(Shape<Int<size<0>(tSrS)>>{});
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
             float old_max = row_max(mi);
             float cur_max = max(old_max, new_row_max(mi));
             row_max(mi) = cur_max;
-            rescale(mi) = exp2f((old_max - cur_max) * params.softmax_scale_log2);
+            max_scaled(mi) = cur_max * params.softmax_scale_log2;
+            rescale(mi) = exp2f(__fmaf_rn(old_max, params.softmax_scale_log2, -max_scaled(mi)));
             row_sum(mi) *= rescale(mi);
         }
 
@@ -209,10 +211,9 @@ __global__ void flash_fwd_kernel(__grid_constant__ const ForwardParams params) {
 
         #pragma unroll
         for (int mi = 0; mi < size<0>(tSrS); mi++) {
-            float max_scaled = row_max(mi) * params.softmax_scale_log2;
             #pragma unroll
             for (int ni = 0; ni < size<2>(tSrS); ni++) {
-                tSrS(mi, 0, ni) = exp2f(__fmaf_rn(tSrS(mi, 0, ni), params.softmax_scale_log2, -max_scaled));
+                tSrS(mi, 0, ni) = exp2f(__fmaf_rn(tSrS(mi, 0, ni), params.softmax_scale_log2, -max_scaled(mi)));
                 row_sum(mi) += tSrS(mi, 0, ni);
             }
         }
